@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kinepolis ticket checker</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #181b22; --line: #262b36; --txt: #e7e9ee;
+    --muted: #9aa3b2; --accent: #4ea1ff; --good: #35c76a; --bad: #ff5d5d;
+    --warn: #e0a83a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--txt);
+    font: 15px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    padding: 24px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: 13px; }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: end;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px; margin-bottom: 18px;
+  }
+  .controls label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  select, input, button {
+    background: #11141a; color: var(--txt); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; font: inherit;
+  }
+  input[type=date] { color-scheme: dark; }
+  button {
+    background: var(--accent); color: #051423; border: none;
+    cursor: pointer; font-weight: 600; padding: 9px 16px;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.secondary { background: #222835; color: var(--txt); font-weight: 500; }
+  .grow { flex: 1; min-width: 200px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 16px;
+  }
+  .movie-head { display: flex; gap: 14px; align-items: flex-start; }
+  .movie-head img { width: 64px; height: 92px; object-fit: cover; border-radius: 6px; flex-shrink: 0; background:#11141a; }
+  .movie-head .info h2 { margin: 0 0 4px; font-size: 17px; }
+  .summary-pills { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .pill {
+    font-size: 12px; font-weight: 700; padding: 3px 10px; border-radius: 999px;
+    white-space: nowrap;
+  }
+  .pill.yes { background: rgba(53,199,106,.15); color: var(--good); }
+  .pill.no  { background: rgba(255,93,93,.12);  color: var(--bad); }
+  .pill.warn{ background: rgba(224,168,58,.15); color: var(--warn); }
+  .target-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .target-row:last-child { border-bottom: none; }
+  .target-row .d { width: 190px; flex-shrink: 0; }
+  .meta { color: var(--muted); font-size: 13px; }
+  a { color: var(--accent); }
+  .status { font-size: 13px; color: var(--muted); margin-top: 4px; }
+  .err { color: var(--bad); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎬 Kinepolis ticket checker</h1>
+  <p class="sub">Live data from Kinepolis' own programmation API. Runs entirely in your browser — pick a movie, format, cinema and date range.</p>
+
+  <div class="controls">
+    <div class="grow">
+      <label>Movie</label>
+      <input id="movieSearch" placeholder="type to filter…" style="width:100%;margin-bottom:6px">
+      <select id="movie" style="width:100%"></select>
+    </div>
+    <div>
+      <label>Format</label>
+      <select id="format"></select>
+    </div>
+    <div>
+      <label>Cinema</label>
+      <select id="cinema"></select>
+    </div>
+    <div>
+      <label>From</label>
+      <input type="date" id="from">
+    </div>
+    <div>
+      <label>To</label>
+      <input type="date" id="to">
+    </div>
+    <button id="refresh">Check</button>
+  </div>
+
+  <div class="card" id="movieCard">
+    <div class="meta">Loading programmation…</div>
+  </div>
+
+  <div id="results"></div>
+  <p class="status" id="status"></p>
+  <p class="meta">Kinepolis releases tickets about a week at a time, so dates further out appear closer to the day. Re-run this to check. &nbsp;·&nbsp; <a id="booklink" href="#" target="_blank" rel="noopener">Open booking page ↗</a></p>
+</div>
+
+<script>
+const PROG_API = 'https://kinepolisweb-programmation.kinepolis.com/api/Programmation/BE/NL/WWW/Cinema/KinepolisBelgium';
+const IMG_CDN  = 'https://cdn.kinepolis.be/images';
+
+// Attributes we treat as pickable "formats" (experience/presentation), code -> label.
+// Order is the order shown in the dropdown. Only those actually present for the
+// selected movie are offered.
+const FORMAT_CODES = {
+  'IMAX W': 'IMAX', '70mm': '70mm', 'LaserUltra': 'Laser Ultra', '4DX': '4DX',
+  'ScreenX': 'ScreenX', '3D W': '3D', 'CineK': 'CineK', 'LiveS': 'Live Stream'
+};
+
+const $ = id => document.getElementById(id);
+const movieSel = $('movie'), formatSel = $('format'), cinemaSel = $('cinema');
+const fromEl = $('from'), toEl = $('to');
+
+let PROG = null;                  // { films, sessions }
+let filmsByHo = new Map();        // HOcode (film.id) -> film
+let sessionsByMovie = new Map();  // HOcode -> [sessions]
+let movieLabels = new Map();      // HOcode -> dropdown label
+
+// A corporateId is NOT unique — e.g. "The Odyssey", "L'Odyssée" (FR),
+// "Seniors: The Odyssey" all share 35300. The HOcode (film.id) is the real
+// per-title key, so everything is grouped by that instead.
+
+const fmtDate = iso => new Date(iso + 'T00:00:00').toLocaleDateString('en-GB',
+  { weekday: 'short', day: '2-digit', month: 'short', year: 'numeric' });
+const isoLocal = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+// showtime like 2026-09-03T11:30:00+00:00 — offset is cosmetic; the wall-clock
+// value is already local Brussels time, so read it verbatim.
+const wallDate = s => s.showtime.slice(0, 10);
+const wallTime = s => s.showtime.slice(11, 16);
+const has = (s, code) => (s.sessionAttributes || []).some(a => a.code === code) ||
+  ('' + (s.rawSessionAttributes || '')).split(',').includes(code);
+
+const slug = t => t.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+  .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+
+const posterUrl = film => {
+  const img = (film.images || []).find(i => i.mediaType === 'Poster Graphic') || (film.images || [])[0];
+  return img ? IMG_CDN + img.url : '';
+};
+
+async function load() {
+  try {
+    const r = await fetch(PROG_API, { headers: { accept: '*/*' } });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    PROG = await r.json();
+  } catch (e) {
+    $('movieCard').innerHTML = '<div class="meta err">Could not load data: ' + e.message +
+      ' — open this file in a normal browser (not a scripted/headless client).</div>';
+    return;
+  }
+
+  // Reset — otherwise a re-check (the "Check" button re-runs load()) would
+  // append to the existing maps and double-count every session.
+  filmsByHo.clear();
+  sessionsByMovie.clear();
+
+  const films = Array.isArray(PROG.films) ? PROG.films : Object.values(PROG.films || {});
+  const sessions = Array.isArray(PROG.sessions) ? PROG.sessions : Object.values(PROG.sessions || {});
+  films.forEach(f => { if (f.id) filmsByHo.set(f.id, f); });
+  sessions.forEach(s => {
+    const ho = s.film && s.film.id;
+    if (!ho) return;
+    (sessionsByMovie.get(ho) || sessionsByMovie.set(ho, []).get(ho)).push(s);
+  });
+
+  const firstLoad = !movieSel.dataset.loaded;
+  const prevMovie = movieSel.value, prevFormat = formatSel.value, prevCinema = cinemaSel.value;
+
+  computeMovieLabels();
+  buildCinemas(sessions, prevCinema);
+  buildMovieOptions('');
+
+  if (firstLoad) {
+    buildDateDefaults();
+    // Preselect The Odyssey if present (mirrors the original tool).
+    const withSessions = ho => sessionsByMovie.has(ho);
+    const exact = [...sessionsByMovie.keys()].find(ho => (filmsByHo.get(ho) || {}).title === 'The Odyssey');
+    const fuzzy = [...sessionsByMovie.keys()].find(ho => /odyssey/i.test((filmsByHo.get(ho) || {}).title || ''));
+    const pick = [exact, fuzzy].find(withSessions);
+    if (pick) movieSel.value = pick;
+    movieSel.dataset.loaded = '1';
+  } else if (sessionsByMovie.has(prevMovie)) {
+    movieSel.value = prevMovie;
+  }
+
+  onMovieChange(firstLoad ? '' : prevFormat);
+  run();
+}
+
+function buildCinemas(sessions, prevValue) {
+  const cin = new Map();
+  sessions.forEach(s => { if (s.mainComplex) cin.set(s.mainComplex, s.cinemaLabel || s.mainComplex); });
+  const sorted = [...cin.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+  cinemaSel.innerHTML = '<option value="">Any cinema</option>' +
+    sorted.map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+  if (prevValue && cin.has(prevValue)) cinemaSel.value = prevValue;
+}
+
+// Build "HOcode -> label", appending the audio language only when a title is
+// shared by several versions (e.g. "Toy Story 5" in EN / FR / NL).
+function computeMovieLabels() {
+  const hos = [...sessionsByMovie.keys()];
+  const byTitle = {};
+  hos.forEach(ho => { const f = filmsByHo.get(ho); if (f) (byTitle[f.title] ||= []).push(ho); });
+  movieLabels.clear();
+  hos.forEach(ho => {
+    const f = filmsByHo.get(ho); if (!f) return;
+    let label = f.title || ho;
+    if ((byTitle[f.title] || []).length > 1) {
+      const lang = f.audioLanguage || (f.spokenLanguage && f.spokenLanguage.code) || '';
+      if (lang) label += ' · ' + lang;
+    }
+    movieLabels.set(ho, label);
+  });
+}
+
+function buildMovieOptions(filter) {
+  const prev = movieSel.value;
+  const f = filter.trim().toLowerCase();
+  const list = [...sessionsByMovie.keys()]
+    .filter(ho => filmsByHo.has(ho))
+    .filter(ho => !f || (movieLabels.get(ho) || '').toLowerCase().includes(f))
+    .sort((a, b) => (movieLabels.get(a) || '').localeCompare(movieLabels.get(b) || ''));
+  movieSel.innerHTML = list.map(ho =>
+    `<option value="${ho}">${movieLabels.get(ho)}</option>`).join('');
+  if (list.includes(prev)) movieSel.value = prev;
+}
+
+function buildDateDefaults() {
+  const today = new Date();
+  fromEl.value = isoLocal(today);
+  toEl.value = isoLocal(new Date(Date.now() + 21 * 864e5));
+}
+
+function currentMovieSessions() {
+  return sessionsByMovie.get(movieSel.value) || [];
+}
+
+// Populate the format dropdown with only the experience formats that this movie
+// actually screens in, plus an "Any format" default.
+function onMovieChange(preferredFormat) {
+  const sess = currentMovieSessions();
+  const present = new Set();
+  sess.forEach(s => Object.keys(FORMAT_CODES).forEach(code => { if (has(s, code)) present.add(code); }));
+  const opts = ['<option value="">Any format</option>'];
+  for (const [code, label] of Object.entries(FORMAT_CODES)) {
+    if (present.has(code)) opts.push(`<option value="${code}">${label}</option>`);
+  }
+  formatSel.innerHTML = opts.join('');
+  if (preferredFormat && present.has(preferredFormat)) formatSel.value = preferredFormat;
+
+  // Update the movie header + booking link.
+  const film = filmsByHo.get(movieSel.value);
+  const card = $('movieCard');
+  if (film) {
+    const p = posterUrl(film);
+    card.innerHTML = `<div class="movie-head">
+      ${p ? `<img src="${p}" alt="">` : ''}
+      <div class="info">
+        <h2>${film.title}</h2>
+        <div class="meta">${film.duration ? film.duration + ' min · ' : ''}${(film.genres || []).map(g => g.name).join(', ')}</div>
+        <div class="summary-pills" id="summaryPills"></div>
+      </div>
+    </div>`;
+    const bl = $('booklink');
+    bl.href = `https://kinepolis.be/nl/movies/detail/${film.corporateId}/${film.id}/0/${slug(film.title || '')}`;
+  }
+}
+
+// One entry per day in [from, to] — every day, not just days with sessions,
+// so "not yet released" is visible alongside bookable/sold-out days.
+function datesInRange(from, to) {
+  const out = [];
+  if (!from || !to) return out;
+  let d = new Date(from + 'T00:00:00');
+  const end = new Date(to + 'T00:00:00');
+  while (d <= end) { out.push(isoLocal(d)); d = new Date(d.getTime() + 864e5); }
+  return out;
+}
+
+function run() {
+  if (!PROG) return;
+  const cinema = cinemaSel.value;
+  const fmt = formatSel.value;
+  const from = fromEl.value, to = toEl.value;
+  const statusEl = $('status');
+
+  const rows = currentMovieSessions()
+    .filter(s => !cinema || s.mainComplex === cinema)
+    .filter(s => !fmt || has(s, fmt))
+    .map(s => ({ date: wallDate(s), time: wallTime(s), sold: !!s.isSoldOut, cinemaLabel: s.cinemaLabel || s.mainComplex }));
+
+  const byDate = {};
+  rows.forEach(r => (byDate[r.date] ||= []).push(r));
+
+  // --- summary pills ---
+  const pillWrap = $('summaryPills');
+  const inRange = rows.filter(r => (!from || r.date >= from) && (!to || r.date <= to));
+  if (pillWrap) {
+    const bookableDays = new Set(inRange.filter(r => !r.sold).map(r => r.date)).size;
+    if (!inRange.length) {
+      pillWrap.innerHTML = '<span class="pill no">No showings in this range yet</span>';
+    } else {
+      pillWrap.innerHTML = `<span class="pill yes">${bookableDays} bookable day${bookableDays === 1 ? '' : 's'}</span>`;
+    }
+  }
+
+  // --- per-day checker ---
+  const res = $('results');
+  const days = datesInRange(from, to);
+  if (!days.length) {
+    res.innerHTML = '<div class="card meta">Pick a from/to date.</div>';
+  } else {
+    const rowsHtml = days.map(d => {
+      const dayRows = byDate[d] || [];
+      const bookable = dayRows.filter(r => !r.sold);
+      const status = !dayRows.length ? 'no' : (bookable.length ? 'yes' : 'no');
+      const label = !dayRows.length ? 'not yet' : (bookable.length ? 'BOOKABLE' : 'SOLD OUT');
+      let detail;
+      if (!dayRows.length) {
+        detail = 'not released yet';
+      } else if (!bookable.length) {
+        detail = 'all shows sold out';
+      } else if (cinema) {
+        detail = [...new Set(bookable.map(r => r.time))].sort().join(', ');
+      } else {
+        const cinemas = new Set(bookable.map(r => r.cinemaLabel));
+        detail = `${bookable.length} show${bookable.length === 1 ? '' : 's'} across ${cinemas.size} cinema${cinemas.size === 1 ? '' : 's'}`;
+      }
+      return `<div class="target-row">
+        <span class="pill ${status}">${label}</span>
+        <span class="d">${fmtDate(d)}</span>
+        <span class="meta">${detail}</span>
+      </div>`;
+    });
+
+    const VISIBLE = 5;
+    const shown = rowsHtml.slice(0, VISIBLE).join('');
+    const rest = rowsHtml.slice(VISIBLE).join('');
+    const moreBtn = rest
+      ? `<button class="secondary" id="showMore" type="button" style="width:100%;margin-top:4px">Show ${days.length - VISIBLE} more date${days.length - VISIBLE === 1 ? '' : 's'}</button>`
+      : '';
+    res.innerHTML = `<div class="card">${shown}<div id="restRows" hidden>${rest}</div></div>${moreBtn}`;
+    if (rest) {
+      $('showMore').addEventListener('click', () => {
+        $('restRows').hidden = false;
+        $('showMore').remove();
+      });
+    }
+  }
+
+  statusEl.textContent = 'Updated ' + new Date().toLocaleString('en-GB');
+  statusEl.className = 'status';
+}
+
+$('movieSearch').addEventListener('input', e => { buildMovieOptions(e.target.value); onMovieChange(); run(); });
+movieSel.addEventListener('change', () => { onMovieChange(); run(); });
+formatSel.addEventListener('change', run);
+cinemaSel.addEventListener('change', run);
+fromEl.addEventListener('change', run);
+toEl.addEventListener('change', run);
+$('refresh').addEventListener('click', load);
+
+load();
+</script>
+</body>
+</html>
