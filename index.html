@@ -143,6 +143,23 @@ const posterUrl = film => {
   return img ? IMG_CDN + img.url : '';
 };
 
+function readParams() {
+  const p = new URLSearchParams(location.search);
+  return { movie: p.get('movie') || '', format: p.get('format') || '', cinema: p.get('cinema') || '',
+    from: p.get('from') || '', to: p.get('to') || '' };
+}
+
+function syncParams() {
+  const p = new URLSearchParams();
+  if (movieSel.value) p.set('movie', movieSel.value);
+  if (formatSel.value) p.set('format', formatSel.value);
+  if (cinemaSel.value) p.set('cinema', cinemaSel.value);
+  if (fromEl.value) p.set('from', fromEl.value);
+  if (toEl.value) p.set('to', toEl.value);
+  const qs = p.toString();
+  history.replaceState(null, '', qs ? '?' + qs : location.pathname);
+}
+
 async function load() {
   try {
     const r = await fetch(PROG_API, { headers: { accept: '*/*' } });
@@ -169,26 +186,38 @@ async function load() {
   });
 
   const firstLoad = !movieSel.dataset.loaded;
-  const prevMovie = movieSel.value, prevFormat = formatSel.value, prevCinema = cinemaSel.value;
+  const urlParams = firstLoad ? readParams() : null;
+  const prevMovie = movieSel.value, prevFormat = formatSel.value;
+  const prevCinema = firstLoad ? urlParams.cinema : cinemaSel.value;
 
   computeMovieLabels();
   buildCinemas(sessions, prevCinema);
   buildMovieOptions('');
 
   if (firstLoad) {
-    buildDateDefaults();
-    // Preselect The Odyssey if present (mirrors the original tool).
-    const withSessions = ho => sessionsByMovie.has(ho);
-    const exact = [...sessionsByMovie.keys()].find(ho => (filmsByHo.get(ho) || {}).title === 'The Odyssey');
-    const fuzzy = [...sessionsByMovie.keys()].find(ho => /odyssey/i.test((filmsByHo.get(ho) || {}).title || ''));
-    const pick = [exact, fuzzy].find(withSessions);
-    if (pick) movieSel.value = pick;
+    if (urlParams.from && urlParams.to) {
+      fromEl.value = urlParams.from;
+      toEl.value = urlParams.to;
+    } else {
+      buildDateDefaults();
+    }
+    if (urlParams.movie && sessionsByMovie.has(urlParams.movie)) {
+      movieSel.value = urlParams.movie;
+    } else {
+      // Preselect The Odyssey if present (mirrors the original tool).
+      const withSessions = ho => sessionsByMovie.has(ho);
+      const exact = [...sessionsByMovie.keys()].find(ho => (filmsByHo.get(ho) || {}).title === 'The Odyssey');
+      const fuzzy = [...sessionsByMovie.keys()].find(ho => /odyssey/i.test((filmsByHo.get(ho) || {}).title || ''));
+      const pick = [exact, fuzzy].find(withSessions);
+      if (pick) movieSel.value = pick;
+    }
     movieSel.dataset.loaded = '1';
   } else if (sessionsByMovie.has(prevMovie)) {
     movieSel.value = prevMovie;
   }
 
-  onMovieChange(firstLoad ? '' : prevFormat);
+  onMovieChange(firstLoad ? urlParams.format : prevFormat);
+  syncParams();
   run();
 }
 
@@ -358,12 +387,14 @@ function run() {
   statusEl.className = 'status';
 }
 
-$('movieSearch').addEventListener('input', e => { buildMovieOptions(e.target.value); onMovieChange(); run(); });
-movieSel.addEventListener('change', () => { onMovieChange(); run(); });
-formatSel.addEventListener('change', run);
-cinemaSel.addEventListener('change', run);
-fromEl.addEventListener('change', run);
-toEl.addEventListener('change', run);
+function runAndSync() { syncParams(); run(); }
+
+$('movieSearch').addEventListener('input', e => { buildMovieOptions(e.target.value); onMovieChange(); runAndSync(); });
+movieSel.addEventListener('change', () => { onMovieChange(); runAndSync(); });
+formatSel.addEventListener('change', runAndSync);
+cinemaSel.addEventListener('change', runAndSync);
+fromEl.addEventListener('change', runAndSync);
+toEl.addEventListener('change', runAndSync);
 $('refresh').addEventListener('click', load);
 
 load();
