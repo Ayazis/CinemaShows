@@ -2,7 +2,8 @@
 
 - [ ] Manual location based cinema selection
 - [ ] Current movies and expected/upcoming movies
-- [ ] Make search parameters query parameters in the URL
+- [x] Make search parameters query parameters in the URL
+- [ ] "Notify me" button per date — self-service email notifications
 
 ## Plans
 
@@ -41,17 +42,30 @@ stuck picking from a flat list.
 - Confirm whether the API even returns not-yet-released films with zero
   sessions; if not, this may need a second API call or a curated list.
 
-### Query parameters in the URL
+### "Notify me" button per date — self-service email notifications
 
-Make the current selection (movie, format, cinema, from, to) reflected in the
-URL so links can be shared and refresh/back-button preserve state.
+Letting arbitrary visitors self-subscribe (not just the dev) needs a real,
+durable backend — a committed-file/GitHub-Actions approach doesn't scale
+since every subscription would need a PR. Everything below can still be done
+on free tiers.
 
-- On load, read `location.search` before `buildDateDefaults()`/preselection
-  logic in `load()` and use those values to override the defaults.
-- On every control change (`movieSel`, `formatSel`, `cinemaSel`, `fromEl`,
-  `toEl`), call `history.replaceState` with an updated `URLSearchParams`
-  (avoid `pushState` to not spam browser history).
-- Since the movie dropdown is keyed by `film.id` (HOcode), use that as the
-  `movie` param value (stable across reloads, unlike title).
-- Keep it degrading gracefully: missing/invalid params fall back to current
-  defaults (Odyssey preselect, today..+21 days).
+- **Backend**: Cloudflare Workers (free tier) + D1 (free SQLite) for storing
+  subscriptions `{email, movieHO, format, cinema, date, createdAt}`, plus a
+  Cron Trigger (free) polling on a schedule (e.g. every 15 min).
+  - Alternative if avoiding Cloudflare: Supabase free tier (Postgres +
+    scheduled Edge Functions) — same shape.
+- **Frontend**: add a small "🔔 Notify me" button to each `.target-row` in
+  `run()` for days that are "not yet"/sold out. Clicking opens a tiny inline
+  form (email input) that POSTs `{email, movie, format, cinema, date}` to a
+  Worker endpoint.
+- **Double opt-in**: on subscribe, Worker sends a confirmation email (via
+  Resend/Mailjet free tier) with a confirm link (signed token) before the
+  subscription goes live — avoids spam/abuse and fake emails.
+- **Cron job**: on each run, re-implements the `run()` "bookable" check
+  against `PROG_API` for every active subscription; when a date flips to
+  bookable, emails the user (via Resend/Mailjet) with a link back to the
+  query-parameter URL (see above) and then deletes/deactivates that
+  subscription (one-shot notification, not repeated).
+- **Unsubscribe**: include an unsubscribe link (token-based) in every email.
+- **Abuse/cost guardrails**: rate-limit subscriptions per IP/email, cap total
+  active subscriptions to stay within free-tier email/DB limits.
