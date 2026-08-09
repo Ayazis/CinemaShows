@@ -17,6 +17,10 @@ const APP_URL = process.env.APP_URL || '';
 const REPO = process.env.GITHUB_REPOSITORY;
 const TOKEN = process.env.GITHUB_TOKEN;
 const LABEL = 'ticket-alert';
+// Who to ping. Assignee puts it in the "Assigned" inbox; the @mention in the
+// body is what reliably pushes through the GitHub mobile app. Defaults to the
+// repo owner, which for a personal watcher is always right.
+const NOTIFY_USER = process.env.NOTIFY_USER || (REPO || '').split('/')[0];
 
 const wallDate = s => s.showtime.slice(0, 10);
 const wallTime = s => s.showtime.slice(11, 16);
@@ -129,6 +133,8 @@ export async function main() {
       const link = appLink(w);
       // null marks "omit"; '' is a deliberate blank line and must survive.
       const body = [
+        NOTIFY_USER ? `@${NOTIFY_USER}` : null,
+        NOTIFY_USER ? '' : null,
         `**${hit.date}** just became bookable for **${label}**.`,
         '',
         `- Cinemas: ${hit.cinemas.join(', ')}`,
@@ -143,7 +149,10 @@ export async function main() {
       if (dryRun) { console.log('  [dry-run] would open: ' + title); continue; }
       await gh(`/repos/${REPO}/issues`, {
         method: 'POST',
-        body: JSON.stringify({ title, body, labels: [LABEL] })
+        body: JSON.stringify({
+          title, body, labels: [LABEL],
+          ...(NOTIFY_USER ? { assignees: [NOTIFY_USER] } : {})
+        })
       });
       opened++;
       console.log('  opened issue: ' + title);

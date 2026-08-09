@@ -27,6 +27,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Link back to the deployed checker in alert issues; blank is fine.
           APP_URL: ${{ vars.APP_URL }}
+          # Who gets assigned + @mentioned. Defaults to the repo owner.
+          NOTIFY_USER: ${{ vars.NOTIFY_USER }}
 
       - name: Persist watch state
         run: |
