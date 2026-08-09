@@ -1,0 +1,44 @@
+name: Ticket watcher
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write      # file the alerts
+  contents: write    # commit .watch-state.json back
+
+concurrency:
+  group: ticket-watcher
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - run: node scripts/watch.mjs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Link back to the deployed checker in alert issues; blank is fine.
+          APP_URL: ${{ vars.APP_URL }}
+
+      - name: Persist watch state
+        run: |
+          # --porcelain, not `git diff`, so a first-run untracked file counts.
+          if [ -z "$(git status --porcelain -- .watch-state.json)" ]; then
+            echo "state unchanged"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .watch-state.json
+          git commit -m "chore: update watch state [skip ci]"
+          # The scheduled run may race a push; rebase rather than fail the job.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
