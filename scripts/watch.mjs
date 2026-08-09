@@ -100,7 +100,7 @@ async function readJson(url, fallback) {
   }
 }
 
-async function main() {
+export async function main() {
   const dryRun = process.argv.includes('--dry-run');
   const watches = await readJson(WATCH_FILE, []);
   const state = await readJson(STATE_FILE, {});
@@ -127,17 +127,18 @@ async function main() {
     for (const hit of fresh) {
       const title = `🎟️ Bookable: ${label} — ${hit.date}`;
       const link = appLink(w);
+      // null marks "omit"; '' is a deliberate blank line and must survive.
       const body = [
         `**${hit.date}** just became bookable for **${label}**.`,
         '',
         `- Cinemas: ${hit.cinemas.join(', ')}`,
         `- Times: ${hit.times.join(', ')}`,
-        w.format ? `- Format: ${w.format}` : '',
+        w.format ? `- Format: ${w.format}` : null,
         '',
-        link ? `[Open in the checker](${link})` : '',
+        link ? `[Open in the checker](${link})` : null,
         '',
         `<sub>Watch: \`${key}\`</sub>`
-      ].filter(Boolean).join('\n');
+      ].filter(l => l !== null).join('\n');
 
       if (dryRun) { console.log('  [dry-run] would open: ' + title); continue; }
       await gh(`/repos/${REPO}/issues`, {
