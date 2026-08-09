@@ -83,13 +83,35 @@ Step 3 is the one that matters: a stub cannot prove a real ping arrives.
 3. Push the code with a temporary test watch; confirm the ping lands on a phone.
 4. Remove the test watch.
 
-## Needed before implementation
+## Needed before deployment
 
-- The webhook URL — added as a secret, never committed.
-- The Discord user ID to ping (enable Developer Mode, right-click name ->
-  Copy User ID).
+1. Create a webhook in Discord:
+   - *Server Settings -> Integrations -> Webhooks -> New Webhook*
+   - Copy the full webhook URL
+   
+2. Add it as a repo secret:
+   - *Settings -> Secrets and variables -> Actions*
+   - New repository secret: `DISCORD_WEBHOOK_URL` = the full URL
 
-Estimated ~45 minutes, most of it verification rather than code.
+3. Get your Discord user ID:
+   - Enable Developer Mode (User Settings -> Advanced -> Developer Mode)
+   - Right-click your name -> Copy User ID
+
+4. (Optional) Add Discord mentions to your watches:
+   - Edit `watches.json`, add `"discord": ["<your id>"]` to each watch you want pinged
+   - If `discord` is absent or empty, the message posts to the channel without pinging
+
+5. Test locally (no webhook needed):
+   ```bash
+   DISCORD_WEBHOOK_URL='https://test' node scripts/watch.mjs --test-discord
+   ```
+
+## Implementation status
+
+- **Code complete**: `postDiscord()` function handles message formatting and posting
+- **Webhook integration**: secret passed through `.github/workflows/watch.yml`
+- **Stub tests**: verify payload shape and error handling
+- **Ready to deploy**: once the webhook URL and user ID(s) are provided
 
 ## Later: self-service for a handful of users
 

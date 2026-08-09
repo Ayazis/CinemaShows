@@ -29,6 +29,8 @@ jobs:
           APP_URL: ${{ vars.APP_URL }}
           # Who gets assigned + @mentioned. Defaults to the repo owner.
           NOTIFY_USER: ${{ vars.NOTIFY_USER }}
+          # Discord webhook URL for additional notifications. Leave blank to disable.
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
       - name: Persist watch state
         run: |

@@ -7,6 +7,7 @@
 - [x] Detect improvements between checks (sold out → available, seats freed up)
 - [ ] Row/seat-level availability — needs a backend, see below
 - [x] Personal watcher — GitHub Actions cron opens an issue when a date flips
+- [x] Discord notifications — optional second channel to the GitHub issues
 - [ ] "Notify me" button per date — self-service email notifications
 
 ## Plans

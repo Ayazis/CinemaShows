@@ -21,6 +21,7 @@ const LABEL = 'ticket-alert';
 // body is what reliably pushes through the GitHub mobile app. Defaults to the
 // repo owner, which for a personal watcher is always right.
 const NOTIFY_USER = process.env.NOTIFY_USER || (REPO || '').split('/')[0];
+const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK_URL || '';
 
 const wallDate = s => s.showtime.slice(0, 10);
 const wallTime = s => s.showtime.slice(11, 16);
@@ -95,6 +96,38 @@ function appLink(w) {
   return `${APP_URL}?${p}`;
 }
 
+async function postDiscord(watch, hits) {
+  if (!DISCORD_WEBHOOK) return;
+  const label = watch.name || watch.movie;
+  const userIds = watch.discord || [];
+  const mention = userIds.length ? ` ${userIds.map(id => `<@${id}>`).join(' ')}` : '';
+  const field = (name, value) => value ? { name, value, inline: false } : null;
+  const payload = {
+    content: mention.trim() ? mention.trim() : null,
+    embeds: [{
+      title: `🎟️ ${label}`,
+      description: hits.map(h =>
+        `**${h.date}** — ${h.cinemas.join(', ')}\n${h.times.join(', ')}`
+      ).join('\n\n'),
+      color: 0x4ea1ff,
+      fields: [
+        field('Format', watch.format),
+        field('Link', APP_URL ? `[Open checker](${appLink(watch)})` : null)
+      ].filter(Boolean)
+    }]
+  };
+  try {
+    const r = await fetch(DISCORD_WEBHOOK, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!r.ok) throw new Error('Discord HTTP ' + r.status);
+  } catch (e) {
+    console.warn('discord post failed: ' + e.message);
+  }
+}
+
 async function readJson(url, fallback) {
   try {
     return JSON.parse(await readFile(url, 'utf8'));
@@ -106,6 +139,19 @@ async function readJson(url, fallback) {
 
 export async function main() {
   const dryRun = process.argv.includes('--dry-run');
+  const testDiscord = process.argv.includes('--test-discord');
+
+  if (testDiscord) {
+    const sampleHit = {
+      date: new Date().toISOString().slice(0, 10),
+      times: ['19:00'],
+      cinemas: ['Test Cinema']
+    };
+    await postDiscord({ name: 'Test watch', movie: 'TEST', format: 'Test', discord: [] }, [sampleHit]);
+    console.log('posted test Discord message');
+    return;
+  }
+
   const watches = await readJson(WATCH_FILE, []);
   const state = await readJson(STATE_FILE, {});
   const prog = await fetchProgrammation();
@@ -156,6 +202,11 @@ export async function main() {
       });
       opened++;
       console.log('  opened issue: ' + title);
+    }
+
+    // Post to Discord in one batch per watch, not per date.
+    if (fresh.length && !dryRun) {
+      await postDiscord(w, fresh);
     }
   }
 
