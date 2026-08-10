@@ -2,10 +2,12 @@
 // uses, evaluates every entry in watches.json, and opens a GitHub issue when a
 // watched date *becomes* bookable.
 //
-// State lives in .watch-state.json, committed back by the workflow. A watch
-// with no state yet is seeded silently — otherwise adding a watch whose range
-// is already on sale would fire an alert per day. Only the transition
-// "not bookable -> bookable" is reported, matching how the app frames it.
+// State lives in .watch-state.json, committed back by the workflow, as
+// { watchKey: { date: discoveredAtISO } }. A watch with no state yet is
+// seeded silently — otherwise adding a watch whose range is already on sale
+// would fire an alert per day. Only the transition "not bookable -> bookable"
+// is reported, matching how the app frames it. A date's discoveredAt is set
+// once, the first time it's seen, and carried forward unchanged after that.
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -106,7 +108,8 @@ async function postDiscord(watch, hits) {
     embeds: [{
       title: `🎟️ ${label}`,
       description: hits.map(h =>
-        `**${h.date}** — ${h.cinemas.join(', ')}\n${h.times.join(', ')}`
+        `**${h.date}** — ${h.cinemas.join(', ')}\n${h.times.join(', ')}` +
+        (h.discoveredAt ? `\n*discovered ${h.discoveredAt}*` : '')
       ).join('\n\n'),
       color: 0x4ea1ff,
       fields: [
@@ -154,6 +157,7 @@ export async function main() {
   const watches = await readJson(WATCH_FILE, []);
   const state = await readJson(STATE_FILE, {});
   const prog = await fetchProgrammation();
+  const now = new Date().toISOString();
   const next = {};
   let opened = 0;
 
@@ -162,25 +166,30 @@ export async function main() {
     const key = watchKey(w);
     const hits = evaluate(prog, w);
     const label = w.name || w.movie;
-    next[key] = hits.map(h => h.date);
+    // Per-date discovery timestamp: keep it if we've seen the date before,
+    // stamp it "now" the first time it appears.
+    const prevKnown = state[key] || {};
+    next[key] = Object.fromEntries(hits.map(h => [h.date, prevKnown[h.date] || now]));
 
     if (!(key in state)) {
       console.log(`${label}: seeded with ${hits.length} bookable day(s) — no alerts on first run`);
       continue;
     }
 
-    const known = new Set(state[key]);
+    const known = new Set(Object.keys(prevKnown));
     const fresh = hits.filter(h => !known.has(h.date));
     console.log(`${label}: ${hits.length} bookable day(s), ${fresh.length} new`);
 
     for (const hit of fresh) {
       const title = `🎟️ Bookable: ${label} — ${hit.date}`;
       const link = appLink(w);
+      const discoveredAt = next[key][hit.date];
       // null marks "omit"; '' is a deliberate blank line and must survive.
       const body = [
         NOTIFY_USER ? `@${NOTIFY_USER}` : null,
         NOTIFY_USER ? '' : null,
         `**${hit.date}** just became bookable for **${label}**.`,
+        `Discovered ${discoveredAt}.`,
         '',
         `- Cinemas: ${hit.cinemas.join(', ')}`,
         `- Times: ${hit.times.join(', ')}`,
@@ -205,7 +214,8 @@ export async function main() {
 
     // Post to Discord in one batch per watch, not per date.
     if (fresh.length && !dryRun) {
-      await postDiscord(w, fresh);
+      const withDiscoveredAt = fresh.map(h => ({ ...h, discoveredAt: next[key][h.date] }));
+      await postDiscord(w, withDiscoveredAt);
     }
   }
 
