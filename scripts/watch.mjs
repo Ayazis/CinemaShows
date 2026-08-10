@@ -97,9 +97,60 @@ function appLink(w) {
   return `${APP_URL}?${p}`;
 }
 
-async function postDiscord(watch, hits) {
+// One batch of newly-bookable dates for one watch — the single fact both
+// notification channels render, so GitHub and Discord can never disagree on
+// what was actually discovered.
+function buildAlertEvent(watch, key, freshHits) {
+  return {
+    watch, key,
+    label: watch.name || watch.movie,
+    hits: freshHits // [{ date, times, cinemas, discoveredAt }]
+  };
+}
+
+function issueTitle(event) {
+  return event.hits.length === 1
+    ? `🎟️ Bookable: ${event.label} — ${event.hits[0].date}`
+    : `🎟️ Bookable: ${event.label} — ${event.hits.length} new dates`;
+}
+
+function issueBody(event) {
+  const { watch, key, label, hits } = event;
+  const link = appLink(watch);
+  const dateLines = hits.map(h =>
+    `- **${h.date}** — ${h.cinemas.join(', ')} · ${h.times.join(', ')} _(discovered ${h.discoveredAt})_`
+  );
+  // null marks "omit"; '' is a deliberate blank line and must survive.
+  return [
+    NOTIFY_USER ? `@${NOTIFY_USER}` : null,
+    NOTIFY_USER ? '' : null,
+    `**${hits.length}** new bookable date${hits.length === 1 ? '' : 's'} for **${label}**.`,
+    '',
+    ...dateLines,
+    '',
+    watch.format ? `- Format: ${watch.format}` : null,
+    '',
+    link ? `[Open in the checker](${link})` : null,
+    '',
+    `<sub>Watch: \`${key}\`</sub>`
+  ].filter(l => l !== null).join('\n');
+}
+
+async function postGitHubIssue(event) {
+  const title = issueTitle(event);
+  await gh(`/repos/${REPO}/issues`, {
+    method: 'POST',
+    body: JSON.stringify({
+      title, body: issueBody(event), labels: [LABEL],
+      ...(NOTIFY_USER ? { assignees: [NOTIFY_USER] } : {})
+    })
+  });
+  console.log('  opened issue: ' + title);
+}
+
+async function postDiscord(event) {
   if (!DISCORD_WEBHOOK) return;
-  const label = watch.name || watch.movie;
+  const { watch, label, hits } = event;
   const userIds = watch.discord || [];
   const mention = userIds.length ? ` ${userIds.map(id => `<@${id}>`).join(' ')}` : '';
   const field = (name, value) => value ? { name, value, inline: false } : null;
@@ -144,12 +195,14 @@ export async function main() {
   const testDiscord = process.argv.includes('--test-discord');
 
   if (testDiscord) {
+    const sampleWatch = { name: 'Test watch', movie: 'TEST', format: 'Test', discord: [] };
     const sampleHit = {
       date: new Date().toISOString().slice(0, 10),
       times: ['19:00'],
-      cinemas: ['Test Cinema']
+      cinemas: ['Test Cinema'],
+      discoveredAt: new Date().toISOString()
     };
-    await postDiscord({ name: 'Test watch', movie: 'TEST', format: 'Test', discord: [] }, [sampleHit]);
+    await postDiscord(buildAlertEvent(sampleWatch, 'TEST', [sampleHit]));
     console.log('posted test Discord message');
     return;
   }
@@ -180,42 +233,20 @@ export async function main() {
     const fresh = hits.filter(h => !known.has(h.date));
     console.log(`${label}: ${hits.length} bookable day(s), ${fresh.length} new`);
 
-    for (const hit of fresh) {
-      const title = `🎟️ Bookable: ${label} — ${hit.date}`;
-      const link = appLink(w);
-      const discoveredAt = next[key][hit.date];
-      // null marks "omit"; '' is a deliberate blank line and must survive.
-      const body = [
-        NOTIFY_USER ? `@${NOTIFY_USER}` : null,
-        NOTIFY_USER ? '' : null,
-        `**${hit.date}** just became bookable for **${label}**.`,
-        `Discovered ${discoveredAt}.`,
-        '',
-        `- Cinemas: ${hit.cinemas.join(', ')}`,
-        `- Times: ${hit.times.join(', ')}`,
-        w.format ? `- Format: ${w.format}` : null,
-        '',
-        link ? `[Open in the checker](${link})` : null,
-        '',
-        `<sub>Watch: \`${key}\`</sub>`
-      ].filter(l => l !== null).join('\n');
-
-      if (dryRun) { console.log('  [dry-run] would open: ' + title); continue; }
-      await gh(`/repos/${REPO}/issues`, {
-        method: 'POST',
-        body: JSON.stringify({
-          title, body, labels: [LABEL],
-          ...(NOTIFY_USER ? { assignees: [NOTIFY_USER] } : {})
-        })
-      });
-      opened++;
-      console.log('  opened issue: ' + title);
-    }
-
-    // Post to Discord in one batch per watch, not per date.
-    if (fresh.length && !dryRun) {
+    // One event describes the whole batch; GitHub and Discord each render it
+    // independently, so a run that discovers N dates opens one issue and
+    // sends one ping, not N of each.
+    if (fresh.length) {
       const withDiscoveredAt = fresh.map(h => ({ ...h, discoveredAt: next[key][h.date] }));
-      await postDiscord(w, withDiscoveredAt);
+      const event = buildAlertEvent(w, key, withDiscoveredAt);
+
+      if (dryRun) {
+        console.log(`  [dry-run] would open: ${issueTitle(event)}`);
+      } else {
+        await postGitHubIssue(event);
+        opened++;
+        await postDiscord(event);
+      }
     }
   }
 
