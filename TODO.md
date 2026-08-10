@@ -74,6 +74,14 @@ Known limits, both inherent to a static browser-only app:
 
 Continuous, unattended watching needs the backend below.
 
+### Personal watcher: open-ended date watching
+
+`scripts/watch.mjs` watches now omit `from`/`to` — a watch matches on
+movie/format/cinema only, and every currently-bookable date not yet in
+`.watch-state.json` triggers an alert. This matches how Kinepolis releases
+tickets in weekly batches: rather than watching one fixed range, you get
+pinged every time a new batch goes on sale, indefinitely.
+
 ### Row/seat-level availability
 
 What the programmation API exposes per session, and nothing more:

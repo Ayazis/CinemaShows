@@ -62,8 +62,9 @@ async function fetchProgrammation() {
   return r.json();
 }
 
-// Bookable days for one watch, as [{ date, times, cinemas }]. Exported so it
-// can be exercised without touching the GitHub API.
+// Bookable days for one watch, as [{ date, times, cinemas }]. Returns all
+// bookable dates matching the filters, without date range constraints. Exported
+// so it can be exercised without touching the GitHub API.
 export function evaluate(prog, w) {
   const sessions = Array.isArray(prog.sessions) ? prog.sessions : Object.values(prog.sessions || {});
   const byDate = new Map();
@@ -73,8 +74,6 @@ export function evaluate(prog, w) {
     if (w.format && !has(s, w.format)) continue;
     if (s.isSoldOut) continue;
     const d = wallDate(s);
-    if (w.from && d < w.from) continue;
-    if (w.to && d > w.to) continue;
     if (!byDate.has(d)) byDate.set(d, []);
     byDate.get(d).push(s);
   }
