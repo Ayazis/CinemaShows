@@ -5,5 +5,11 @@
     "format": "70mm",
     "cinema": "KBRU",
     "discord": ["451643177040871434"]
+  },
+  {
+    "name": "The Odyssey · 70mm · KINO Rotterdam",
+    "source": "kino-rotterdam",
+    "url": "https://kinorotterdam.nl/films/the-odyssey/",
+    "discord": ["451643177040871434"]
   }
 ]
