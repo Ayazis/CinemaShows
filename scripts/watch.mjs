@@ -4,11 +4,22 @@
 // *becomes* bookable.
 //
 // State lives in .watch-state.json, committed back by the workflow, as
-// { watchKey: { date: discoveredAtISO } }. A watch with no state yet is
+// { watchKey: { date: { seen, alerted } } }. A watch with no state yet is
 // seeded silently — otherwise adding a watch whose range is already on sale
-// would fire an alert per day. Only the transition "not bookable -> bookable"
-// is reported, matching how the app frames it. A date's discoveredAt is set
-// once, the first time it's seen, and carried forward unchanged after that.
+// would fire an alert per day.
+//
+// Every date the source lists is recorded, sold out or not. Sold-out dates
+// used to be dropped, which erased their history: when seats came back the
+// date looked brand new and re-alerted, so a session flapping in and out of
+// sold-out pinged repeatedly (and the feed's sold-out flag lags the real
+// booking page, so those pings could arrive for a show already gone again).
+// Keeping them means a date alerts exactly once — the first run where it is
+// actually bookable. A date that debuts sold out still alerts later, when it
+// opens; a date that sells out and reopens stays quiet.
+//
+// `seen` is stamped the first time a date appears at all and carried forward
+// unchanged; `alerted` is stamped when it fires, and its presence is what
+// suppresses every later alert for that date.
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -69,9 +80,12 @@ async function fetchProgrammation() {
   return r.json();
 }
 
-// Bookable days for one watch, as [{ date, times, cinemas }]. Returns all
-// bookable dates matching the filters, without date range constraints. Exported
-// so it can be exercised without touching the GitHub API.
+// Every day one watch has a showing on, as [{ date, times, cinemas, bookable }],
+// without date range constraints. Sold-out days are included with
+// bookable:false so state can remember them; `times` and `cinemas` describe
+// only the showings you can actually book, falling back to all of them on a
+// fully sold-out day. Exported so it can be exercised without touching the
+// GitHub API.
 export function evaluate(prog, w) {
   const sessions = Array.isArray(prog.sessions) ? prog.sessions : Object.values(prog.sessions || {});
   const byDate = new Map();
@@ -79,16 +93,20 @@ export function evaluate(prog, w) {
     if (!s.film || s.film.id !== w.movie) continue;
     if (w.cinema && s.mainComplex !== w.cinema) continue;
     if (w.format && !has(s, w.format)) continue;
-    if (s.isSoldOut) continue;
     const d = wallDate(s);
     if (!byDate.has(d)) byDate.set(d, []);
     byDate.get(d).push(s);
   }
-  return [...byDate.entries()].sort().map(([date, ss]) => ({
-    date,
-    times: [...new Set(ss.map(wallTime))].sort(),
-    cinemas: [...new Set(ss.map(s => s.cinemaLabel || s.mainComplex))].sort()
-  }));
+  return [...byDate.entries()].sort().map(([date, all]) => {
+    const open = all.filter(s => !s.isSoldOut);
+    const ss = open.length ? open : all;
+    return {
+      date,
+      times: [...new Set(ss.map(wallTime))].sort(),
+      cinemas: [...new Set(ss.map(s => s.cinemaLabel || s.mainComplex))].sort(),
+      bookable: open.length > 0
+    };
+  });
 }
 
 // Kino Rotterdam has no API — the film page is server-rendered with one
@@ -117,9 +135,18 @@ async function fetchKinoRotterdam(url) {
   return events;
 }
 
-// Bookable days for one Kino Rotterdam watch, in the same [{date, times,
-// cinemas}] shape evaluate() returns for Kinepolis. There's one showing per
-// film page (no per-cinema/format filtering — the page itself is the format).
+// Kino Rotterdam leaves eventStatus at EventScheduled for a sold-out showing
+// and expresses it in the offer instead, so this is the only place sold-out is
+// visible. Absent offers count as bookable: a missing offer means the page
+// didn't say, and Kinepolis's sold-out flag is optimistic in the same way.
+// `offers` is a single Offer in practice, but schema.org permits an array.
+const kinoBookable = e => [e.offers].flat()
+  .every(o => !o || !o.availability || o.availability === 'https://schema.org/InStock');
+
+// Every day one Kino Rotterdam watch has a showing on, in the same
+// [{ date, times, cinemas, bookable }] shape evaluate() returns for Kinepolis.
+// There's one showing per film page (no per-cinema/format filtering — the page
+// itself is the format).
 export function evaluateKinoRotterdam(events) {
   const byDate = new Map();
   for (const e of events) {
@@ -129,13 +156,16 @@ export function evaluateKinoRotterdam(events) {
     if (typeof e.startDate !== 'string') continue;
     const d = e.startDate.slice(0, 10);
     const t = e.startDate.slice(11, 16);
-    if (!byDate.has(d)) byDate.set(d, new Set());
-    byDate.get(d).add(t);
+    if (!byDate.has(d)) byDate.set(d, { open: new Set(), all: new Set() });
+    const day = byDate.get(d);
+    day.all.add(t);
+    if (kinoBookable(e)) day.open.add(t);
   }
-  return [...byDate.entries()].sort().map(([date, times]) => ({
+  return [...byDate.entries()].sort().map(([date, { open, all }]) => ({
     date,
-    times: [...times].sort(),
-    cinemas: ['KINO Rotterdam']
+    times: [...(open.size ? open : all)].sort(),
+    cinemas: ['KINO Rotterdam'],
+    bookable: open.size > 0
   }));
 }
 
@@ -235,6 +265,14 @@ async function postDiscord(event) {
   }
 }
 
+// Migrates one watch's stored dates from the old { date: seenISO } shape.
+// Everything already in state was recorded back when only bookable dates were
+// stored, so it has been reported and must not alert again.
+function normalizeKnown(known) {
+  return Object.fromEntries(Object.entries(known || {}).map(([date, v]) =>
+    [date, typeof v === 'string' ? { seen: v, alerted: v } : v]));
+}
+
 async function readJson(url, fallback) {
   try {
     return JSON.parse(await readFile(url, 'utf8'));
@@ -286,25 +324,35 @@ export async function main() {
     }
     const key = watchKey(w);
     const label = w.name || w.movie || w.url;
-    // Per-date discovery timestamp: keep it if we've seen the date before,
-    // stamp it "now" the first time it appears.
-    const prevKnown = state[key] || {};
-    next[key] = Object.fromEntries(hits.map(h => [h.date, prevKnown[h.date] || now]));
+    const seeding = !(key in state);
+    const prevKnown = normalizeKnown(state[key]);
+    // A date fires once: the first run where it's bookable and hasn't already
+    // alerted. Seeding stamps every date as alerted so the first run is silent.
+    const fresh = seeding ? [] : hits.filter(h => h.bookable && !prevKnown[h.date]?.alerted);
+    const firedNow = new Set(fresh.map(h => h.date));
 
-    if (!(key in state)) {
-      console.log(`${label}: seeded with ${hits.length} bookable day(s) — no alerts on first run`);
+    next[key] = Object.fromEntries(hits.map(h => {
+      const prev = prevKnown[h.date];
+      return [h.date, {
+        seen: prev?.seen || now,
+        // null, not undefined — it has to survive the JSON round-trip so the
+        // "debuted sold out, still owed an alert" case stays visible.
+        alerted: prev?.alerted || (seeding || firedNow.has(h.date) ? now : null)
+      }];
+    }));
+
+    const open = hits.filter(h => h.bookable).length;
+    if (seeding) {
+      console.log(`${label}: seeded with ${hits.length} day(s) (${open} bookable) — no alerts on first run`);
       continue;
     }
-
-    const known = new Set(Object.keys(prevKnown));
-    const fresh = hits.filter(h => !known.has(h.date));
-    console.log(`${label}: ${hits.length} bookable day(s), ${fresh.length} new`);
+    console.log(`${label}: ${hits.length} day(s), ${open} bookable, ${fresh.length} new`);
 
     // One event describes the whole batch; GitHub and Discord each render it
     // independently, so a run that discovers N dates opens one issue and
     // sends one ping, not N of each.
     if (fresh.length) {
-      const withDiscoveredAt = fresh.map(h => ({ ...h, discoveredAt: next[key][h.date] }));
+      const withDiscoveredAt = fresh.map(h => ({ ...h, discoveredAt: next[key][h.date].seen }));
       const event = buildAlertEvent(w, key, withDiscoveredAt);
 
       if (dryRun) {
