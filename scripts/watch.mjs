@@ -20,6 +20,9 @@
 // `seen` is stamped the first time a date appears at all and carried forward
 // unchanged; `alerted` is stamped when it fires, and its presence is what
 // suppresses every later alert for that date.
+//
+// Kinepolis's feed publishes the *schedule* weeks before tickets go on sale,
+// so "bookable" is also gated on a derived sales horizon — see salesHorizon().
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
@@ -43,6 +46,54 @@ const wallTime = s => s.showtime.slice(11, 16);
 // Mirrors index.html: attributes arrive in either shape depending on the feed.
 const has = (s, code) => (s.sessionAttributes || []).some(a => a.code === code) ||
   ('' + (s.rawSessionAttributes || '')).split(',').includes(code);
+
+// The feed lists sessions far beyond what you can actually buy: Kinepolis
+// publishes the schedule months ahead but only opens sales about a week at a
+// time. Nothing on a session says which side of that line it falls on — a
+// not-yet-on-sale session and a freely bookable one differ only in showtime.
+// Such a session has sold nothing, so isSoldOut is trivially false, and taking
+// that as "bookable" fires an alert the day the schedule is published rather
+// than the day tickets actually appear.
+//
+// The feed does give it away in aggregate: inside the sales window the whole
+// circuit runs several hundred sessions a day, and past it the count falls off
+// a cliff to a handful of pre-announced screenings. So derive the horizon from
+// that shape — walk forward from the first day and stop at the first day
+// carrying less than HORIZON_FRACTION of the busiest day's sessions.
+//
+// Deliberately circuit-wide rather than per-watch: one film at one cinema is
+// far too few sessions for the cliff to be visible, and the sales window is a
+// property of the chain, not of a title.
+//
+// HORIZON_MIN_DAYS is a floor, not a guess at the window — if the feed ever
+// comes back thin or oddly shaped, a horizon of "today" would silence every
+// watch permanently, which fails in the one direction that matters.
+const HORIZON_FRACTION = 0.05;
+const HORIZON_MIN_DAYS = 7;
+
+const addDays = (date, n) =>
+  new Date(Date.parse(date + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+
+// Last date (YYYY-MM-DD) tickets are plausibly on sale for, or null if the feed
+// is empty. Exported alongside evaluate() so it can be exercised directly.
+export function salesHorizon(prog) {
+  const sessions = Array.isArray(prog.sessions) ? prog.sessions : Object.values(prog.sessions || {});
+  const perDate = new Map();
+  for (const s of sessions) {
+    const d = wallDate(s);
+    perDate.set(d, (perDate.get(d) || 0) + 1);
+  }
+  const dates = [...perDate.keys()].sort();
+  if (!dates.length) return null;
+  const threshold = Math.max(...perDate.values()) * HORIZON_FRACTION;
+  let horizon = dates[0];
+  for (const d of dates) {
+    if (perDate.get(d) < threshold) break;
+    horizon = d;
+  }
+  const floor = addDays(dates[0], HORIZON_MIN_DAYS);
+  return horizon < floor ? floor : horizon;
+}
 
 // Identity of a watch = its filters, not its display name, so renaming a watch
 // doesn't re-seed it but changing what it watches does.
@@ -86,7 +137,13 @@ async function fetchProgrammation() {
 // only the showings you can actually book, falling back to all of them on a
 // fully sold-out day. Exported so it can be exercised without touching the
 // GitHub API.
-export function evaluate(prog, w) {
+//
+// `horizon` is the last on-sale date (see salesHorizon); days past it are
+// reported bookable:false. They still come back as days, so state remembers
+// them and each one alerts exactly once — on the run where the horizon finally
+// reaches it, which is the day it genuinely goes on sale. Pass null to take the
+// feed at its word.
+export function evaluate(prog, w, horizon = null) {
   const sessions = Array.isArray(prog.sessions) ? prog.sessions : Object.values(prog.sessions || {});
   const byDate = new Map();
   for (const s of sessions) {
@@ -104,7 +161,7 @@ export function evaluate(prog, w) {
       date,
       times: [...new Set(ss.map(wallTime))].sort(),
       cinemas: [...new Set(ss.map(s => s.cinemaLabel || s.mainComplex))].sort(),
-      bookable: open.length > 0
+      bookable: open.length > 0 && (!horizon || date <= horizon)
     };
   });
 }
@@ -308,6 +365,7 @@ export async function main() {
   // Kinepolis is one shared feed for every watch; Kino Rotterdam is scraped
   // per film page, so cache each fetch by URL instead of doing it once.
   let prog = null;
+  let horizon = null;
   const kinoRotterdamPages = new Map();
 
   for (const w of watches) {
@@ -319,8 +377,15 @@ export async function main() {
       hits = evaluateKinoRotterdam(kinoRotterdamPages.get(w.url));
     } else {
       if (!w.movie) { console.log(`skip "${w.name || '(unnamed)'}": no movie HOcode`); continue; }
-      if (!prog) prog = await fetchProgrammation();
-      hits = evaluate(prog, w);
+      if (!prog) {
+        prog = await fetchProgrammation();
+        horizon = salesHorizon(prog);
+        console.log('kinepolis sales horizon: ' + horizon + ' (later dates are tracked, not alerted)');
+      }
+      // A watch can opt out with "horizon": false — worth it for a title whose
+      // tickets genuinely go on sale months early, where the chain-wide cliff
+      // would hold its alert back until the week of.
+      hits = evaluate(prog, w, w.horizon === false ? null : horizon);
     }
     const key = watchKey(w);
     const label = w.name || w.movie || w.url;
